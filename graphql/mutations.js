@@ -1,25 +1,26 @@
 const { GraphQLString, GraphQLID, GraphQLNonNull } = require("graphql");
 const { User, Post, Comment } = require("../models");
-const { createJWTToken } = require("../util/auth");
+const { auth, bcrypt } = require("../util");
 const { PostType, CommentType } = require("./types");
 
 const register = {
   type: GraphQLString,
   args: {
-    username: { type: GraphQLString },
-    email: { type: GraphQLString },
-    password: { type: GraphQLString },
-    displayName: { type: GraphQLString },
+    username: { type: new GraphQLNonNull(GraphQLString) },
+    email: { type: new GraphQLNonNull(GraphQLString) },
+    password: { type: new GraphQLNonNull(GraphQLString) },
+    displayName: { type: new GraphQLNonNull(GraphQLString) },
   },
-  async resolve(parent, args) {
-    const { username, email, password, displayName } = args;
+  async resolve(_, { username, email, password, displayName }) {
     const user = new User({ username, email, password, displayName });
-
-    console.log(args);
-
+    user.password = await bcrypt.encryptPassword(user.password);
     await user.save();
-    const token = createJWTToken(user);
 
+    const token = auth.createJWTToken({
+      _id: user._id,
+      email: user.email,
+      displayName: user.displayName,
+    });
     return token;
   },
 };
@@ -27,16 +28,24 @@ const register = {
 const login = {
   type: GraphQLString,
   args: {
-    email: { type: GraphQLString },
-    password: { type: GraphQLString },
+    email: { type: new GraphQLNonNull(GraphQLString) },
+    password: { type: new GraphQLNonNull(GraphQLString) },
   },
-  async resolve(parent, args) {
-    const user = await User.findOne({ email: args.email }).select("+password");
-    if (!user || args.password !== user.password) {
-      throw new Error("Invalid Credentials");
-    }
+  async resolve(_, { email, password }) {
+    const user = await User.findOne({ email }).select("+password");
 
-    const token = createJWTToken(user);
+    if (!user) throw new Error("Invalid Username");
+
+    const validPassword = await bcrypt.comparePassword(password, user.password);
+
+    if (!validPassword) throw new Error("Invalid Password");
+
+    const token = auth.createJWTToken({
+      _id: user._id,
+      email: user.email,
+      displayName: user.displayName,
+    });
+
     return token;
   },
 };
@@ -45,16 +54,14 @@ const createPost = {
   type: PostType,
   description: "create a new blog post",
   args: {
-    title: { type: GraphQLString },
-    body: { type: GraphQLString },
+    title: { type: new GraphQLNonNull(GraphQLString) },
+    body: { type: new GraphQLNonNull(GraphQLString) },
   },
-  async resolve(parent, args, { verifiedUser }) {
-    if (!verifiedUser) {
-      throw new Error("You must be logged in to do that");
-    }
+  async resolve(_, args, { verifiedUser }) {
+    if (!verifiedUser) throw new Error("You must be logged in to do that");
 
     const userFound = await User.findById(verifiedUser._id);
-    if (!userFound) throw new Error("UnAuthorized");
+    if (!userFound) throw new Error("Unauthorized");
 
     const post = new Post({
       authorId: verifiedUser._id,
@@ -70,16 +77,16 @@ const updatePost = {
   type: PostType,
   description: "update a blog post",
   args: {
-    id: { type: GraphQLID },
-    title: { type: GraphQLString },
-    body: { type: GraphQLString },
+    id: { type: new GraphQLNonNull(GraphQLID) },
+    title: { type: new GraphQLNonNull(GraphQLString) },
+    body: { type: new GraphQLNonNull(GraphQLString) },
   },
-  async resolve(parent, args, { verifiedUser }) {
+  async resolve(_, { id, title, body }, { verifiedUser }) {
     if (!verifiedUser) throw new Error("Unauthorized");
 
     const postUpdated = await Post.findOneAndUpdate(
-      { _id: args.id, authorId: verifiedUser._id },
-      { title: args.title, body: args.body },
+      { _id: id, authorId: verifiedUser._id },
+      { title, body },
       {
         new: true,
         runValidators: true,
@@ -96,9 +103,9 @@ const deletePost = {
   type: GraphQLString,
   description: "Delete post",
   args: {
-    postId: { type: GraphQLID },
+    postId: { type: new GraphQLNonNull(GraphQLID) },
   },
-  async resolve(parent, args, { verifiedUser }) {
+  async resolve(_, args, { verifiedUser }) {
     const postDeleted = await Post.findOneAndDelete({
       _id: args.postId,
       authorId: verifiedUser._id,
@@ -114,16 +121,16 @@ const addComment = {
   type: CommentType,
   description: "Create a new comment for a blog post",
   args: {
-    comment: { type: GraphQLString },
-    postId: { type: GraphQLID },
+    comment: { type: new GraphQLNonNull(GraphQLString) },
+    postId: { type: new GraphQLNonNull(GraphQLID) },
   },
-  resolve(parent, args, { verifiedUser }) {
-    const comment = new Comment({
+  resolve(_, { postId, comment }, { verifiedUser }) {
+    const newComment = new Comment({
       userId: verifiedUser._id,
-      postId: args.postId,
-      comment: args.comment,
+      postId,
+      comment,
     });
-    return comment.save();
+    return newComment.save();
   },
 };
 
@@ -131,19 +138,19 @@ const updateComment = {
   type: CommentType,
   description: "update a comment",
   args: {
-    id: { type: GraphQLID },
+    id: { type: new GraphQLNonNull(GraphQLID) },
     comment: { type: new GraphQLNonNull(GraphQLString) },
   },
-  async resolve(parent, args, { verifiedUser }) {
+  async resolve(_, { id, comment }, { verifiedUser }) {
     if (!verifiedUser) throw new Error("UnAuthorized");
 
     const commentUpdated = await Comment.findOneAndUpdate(
       {
-        _id: args.id,
+        _id: id,
         userId: verifiedUser._id,
       },
       {
-        comment: args.comment,
+        comment,
       },
       {
         new: true,
@@ -161,14 +168,13 @@ const deleteComment = {
   type: GraphQLString,
   description: "delete a comment",
   args: {
-    commentId: { type: new GraphQLNonNull(GraphQLID) },
+    id: { type: new GraphQLNonNull(GraphQLID) },
   },
-  async resolve(parent, args, { verifiedUser }) {
-    console.log(args);
+  async resolve(_, { id }, { verifiedUser }) {
     if (!verifiedUser) throw new Error("Unauthorized");
 
     const commentDelete = await Comment.findOneAndDelete({
-      _id: args.commentId,
+      _id: id,
       userId: verifiedUser._id,
     });
 
